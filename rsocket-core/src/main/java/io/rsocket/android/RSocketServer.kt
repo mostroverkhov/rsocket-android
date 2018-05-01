@@ -70,11 +70,10 @@ internal class RSocketServer(
                 .receive()
                 .concatMapEager { frame ->
                     handleFrame(frame)
-                            .onErrorResumeNext(
-                                    { t: Throwable ->
-                                        errorConsumer.invoke(t)
-                                        Completable.complete()
-                                    }).toFlowable<Void>()
+                            .onErrorResumeNext { t: Throwable ->
+                                errorConsumer(t)
+                                Completable.complete()
+                            }.toFlowable<Void>()
                 }
                 .ignoreElements()
                 .subscribe(
@@ -257,7 +256,7 @@ internal class RSocketServer(
                 .onErrorResumeNext { t -> Single.just(Frame.Error.from(streamId, t)) }
                 .doAfterSuccess { sendProcessor.onNext(it) }
                 .doFinally { removeSubscription(streamId) }
-                .toCompletable()
+                .ignoreElement()
     }
 
     private fun handleStream(streamId: Int, response: Flowable<Payload>, initialRequestN: Int): Completable {
@@ -331,12 +330,12 @@ internal class RSocketServer(
 
     @Synchronized
     private fun addSubscription(streamId: Int, subscription: Subscription) {
-        sendingSubscriptions.put(streamId, subscription)
+        sendingSubscriptions[streamId] = subscription
     }
 
     @Synchronized
     private fun getSubscription(streamId: Int): Subscription? =
-            sendingSubscriptions.get(streamId)
+            sendingSubscriptions[streamId]
 
     @Synchronized
     private fun removeSubscription(streamId: Int) {
@@ -345,12 +344,12 @@ internal class RSocketServer(
 
     @Synchronized
     private fun addChannelProcessor(streamId: Int, processor: UnicastProcessor<Payload>) {
-        channelProcessors.put(streamId, processor)
+        channelProcessors[streamId] = processor
     }
 
     @Synchronized
     private fun getChannelProcessor(streamId: Int): UnicastProcessor<Payload>? =
-            channelProcessors.get(streamId)
+            channelProcessors[streamId]
 
     @Synchronized
     private fun removeChannelProcessor(streamId: Int) {
@@ -358,7 +357,7 @@ internal class RSocketServer(
     }
 
     companion object {
-        val DEFAULT_STREAM_WINDOW = 128
+        const val DEFAULT_STREAM_WINDOW = 128
     }
 
     internal sealed class DisposableSubscription : Disposable, Subscription {

@@ -48,21 +48,6 @@ internal class RSocketClient @JvmOverloads constructor(
         ackTimeout: Duration = Duration.ZERO,
         missedAcks: Int = 0) : RSocket {
 
-    internal constructor(connection: DuplexConnection,
-                         errorConsumer: (Throwable) -> Unit,
-                         streamIdSupplier: StreamIdSupplier,
-                         tickPeriod: Duration = Duration.ZERO,
-                         ackTimeout: Duration = Duration.ZERO,
-                         missedAcks: Int = 0)
-            : this(
-            connection,
-            errorConsumer,
-            streamIdSupplier,
-            DEFAULT_STREAM_WINDOW,
-            tickPeriod,
-            ackTimeout,
-            missedAcks)
-
     private val started: PublishProcessor<Void> = PublishProcessor.create()
     private val completeOnStart = started.ignoreElements()
     private val senders: IntObjectHashMap<LimitableRequestPublisher<*>> = IntObjectHashMap(256, 0.9f)
@@ -195,7 +180,7 @@ internal class RSocketClient @JvmOverloads constructor(
                     val streamId = streamIdSupplier.nextStreamId()
                     val receiver = UnicastProcessor.create<Payload>()
                     synchronized(this) {
-                        receivers.put(streamId, receiver)
+                        receivers[streamId] = receiver
                     }
 
                     val first = AtomicBoolean(false)
@@ -233,7 +218,7 @@ internal class RSocketClient @JvmOverloads constructor(
                             val receiver = PublishProcessor.create<Payload>()
 
                             synchronized(this) {
-                                receivers.put(streamId, receiver)
+                                receivers[streamId] = receiver
                             }
 
                             sendProcessor.onNext(requestFrame)
@@ -283,8 +268,8 @@ internal class RSocketClient @JvmOverloads constructor(
                                                                     // Need to set this to one for first the frame
                                                                     wrapped.increaseRequestLimit(1)
                                                                     synchronized(this) {
-                                                                        senders.put(streamId, wrapped)
-                                                                        receivers.put(streamId, receiver)
+                                                                        senders[streamId] = wrapped
+                                                                        receivers[streamId] = receiver
                                                                     }
                                                                     wrapped
                                                                 }
@@ -405,7 +390,7 @@ internal class RSocketClient @JvmOverloads constructor(
     private fun handleFrame(streamId: Int, type: FrameType, frame: Frame) {
         var receiver: Subscriber<Payload>? = null
         synchronized(this) {
-            receiver = receivers.get(streamId)
+            receiver = receivers[streamId]
         }
         if (receiver == null) {
             handleMissingResponseProcessor(streamId, type, frame)
@@ -433,7 +418,7 @@ internal class RSocketClient @JvmOverloads constructor(
                 FrameType.REQUEST_N -> {
                     var sender: LimitableRequestPublisher<*>? = null
                     synchronized(this) {
-                        sender = senders.get(streamId)
+                        sender = senders[streamId]
                     }
                     if (sender != null) {
                         val n = Frame.RequestN.requestN(frame).toLong()
@@ -482,7 +467,6 @@ internal class RSocketClient @JvmOverloads constructor(
 
     companion object {
         private val CLOSED_CHANNEL_EXCEPTION = noStacktrace(ClosedChannelException())
-        private val DEFAULT_STREAM_WINDOW = 128
     }
 
     private fun <T> UnicastProcessor<T>.isTerminated(): Boolean = hasComplete() || hasThrowable()
