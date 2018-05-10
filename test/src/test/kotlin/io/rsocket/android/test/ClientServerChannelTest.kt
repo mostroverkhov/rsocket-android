@@ -27,14 +27,8 @@ class ClientServerChannelTest {
         channelHandler = ChannelHandler(intervalMillis)
         server = RSocketFactory
                 .receive()
-                .acceptor {
-                    object : SocketAcceptor {
-                        override fun accept(setup: ConnectionSetupPayload,
-                                            sendingSocket: RSocket): Single<RSocket> {
-                            return Single.just(channelHandler)
-                        }
-                    }
-                }.transport(serverTransport)
+                .acceptor { { _, _ -> channelHandler } }
+                .transport(serverTransport)
                 .start()
                 .blockingGet()
 
@@ -43,7 +37,7 @@ class ClientServerChannelTest {
 
         client = RSocketFactory
                 .connect()
-                .transport { clientTransport }
+                .transport(clientTransport)
                 .start()
                 .blockingGet()
     }

@@ -23,6 +23,7 @@ import io.rsocket.android.fragmentation.FragmentationDuplexConnection
 import io.rsocket.android.frame.SetupFrameFlyweight
 import io.rsocket.android.frame.VersionFlyweight
 import io.rsocket.android.internal.ClientServerInputMultiplexer
+import io.rsocket.android.internal.NoopHandler
 import io.rsocket.android.plugins.DuplexConnectionInterceptor
 import io.rsocket.android.plugins.PluginRegistry
 import io.rsocket.android.plugins.Plugins
@@ -34,7 +35,6 @@ import io.rsocket.android.util.PayloadImpl
 /** Factory for creating RSocket clients and servers.  */
 object RSocketFactory {
 
-    private const val DEFAULT_STREAM_DEMAND_LIMIT = 128
     /**
      * Creates a factory that establishes client connections to other RSockets.
      *
@@ -49,27 +49,9 @@ object RSocketFactory {
      */
     fun receive(): ServerRSocketFactory = ServerRSocketFactory()
 
-    interface Start<T : Closeable> {
-        fun start(): Single<T>
-    }
+    class ClientRSocketFactory internal constructor() {
 
-    interface ClientTransportAcceptor {
-        fun transport(transport: () -> ClientTransport): Start<RSocket>
-
-        fun transport(transport: ClientTransport): Start<RSocket> = transport { transport }
-
-    }
-
-    interface ServerTransportAcceptor {
-        fun <T : Closeable> transport(transport: () -> ServerTransport<T>): Start<T>
-
-        fun <T : Closeable> transport(transport: ServerTransport<T>): Start<T> = transport({ transport })
-
-    }
-
-    class ClientRSocketFactory {
-
-        private var acceptor: () -> (RSocket) -> RSocket = { { rs -> rs } }
+        private var acceptor: ClientAcceptor = { { _ -> NoopHandler() } }
 
         private var errorConsumer: (Throwable) -> Unit = { it.printStackTrace() }
         private var mtu = 0
@@ -108,7 +90,9 @@ object RSocketFactory {
         }
 
         fun keepAlive(
-                tickPeriod: Duration, ackTimeout: Duration, missedAcks: Int): ClientRSocketFactory {
+                tickPeriod: Duration,
+                ackTimeout: Duration,
+                missedAcks: Int): ClientRSocketFactory {
             this.tickPeriod = tickPeriod
             this.ackTimeout = ackTimeout
             this.missedAcks = missedAcks
@@ -130,7 +114,8 @@ object RSocketFactory {
             return this
         }
 
-        fun mimeType(metadataMimeType: String, dataMimeType: String): ClientRSocketFactory {
+        fun mimeType(metadataMimeType: String,
+                     dataMimeType: String): ClientRSocketFactory {
             this.dataMimeType = dataMimeType
             this.metadataMimeType = metadataMimeType
             return this
@@ -146,13 +131,17 @@ object RSocketFactory {
             return this
         }
 
-        fun transport(transport: () -> ClientTransport): Start<RSocket> = StartClient(transport)
+        fun transport(transport: () -> ClientTransport): Start<RSocket> =
+                StartClient(transport)
 
-        fun acceptor(acceptor: () -> (RSocket) -> RSocket): ClientTransportAcceptor {
+        fun transport(transport: ClientTransport): Start<RSocket> =
+                StartClient { transport }
+
+        fun acceptor(acceptor: ClientAcceptor): ClientTransportAcceptor {
             this.acceptor = acceptor
             return object : ClientTransportAcceptor {
-                override fun transport(transport: () -> ClientTransport): Start<RSocket> = StartClient(transport)
-
+                override fun transport(transport: () -> ClientTransport) =
+                        StartClient(transport)
             }
         }
 
@@ -176,7 +165,7 @@ object RSocketFactory {
             return this
         }
 
-        private inner class StartClient internal constructor(private val transportClient: () -> ClientTransport)
+        private inner class StartClient(val transportClient: () -> ClientTransport)
             : Start<RSocket> {
 
             override fun start(): Single<RSocket> {
@@ -235,7 +224,7 @@ object RSocketFactory {
 
     class ServerRSocketFactory internal constructor() {
 
-        private var acceptor: (() -> SocketAcceptor)? = null
+        private var acceptor: ServerAcceptor = { { _, _ -> NoopHandler() } }
         private var errorConsumer: (Throwable) -> Unit = { it.printStackTrace() }
         private var mtu = 0
         private val plugins = PluginRegistry(Plugins.defaultPlugins())
@@ -256,11 +245,11 @@ object RSocketFactory {
             return this
         }
 
-        fun acceptor(acceptor: () -> SocketAcceptor): ServerTransportAcceptor {
+        fun acceptor(acceptor: ServerAcceptor): ServerTransportAcceptor {
             this.acceptor = acceptor
             return object : ServerTransportAcceptor {
-                override fun <T : Closeable> transport(transport: () -> ServerTransport<T>): Start<T> =
-                        ServerStart(transport)
+                override fun <T : Closeable> transport(transport: () -> ServerTransport<T>)
+                        : Start<T> = ServerStart(transport)
             }
         }
 
@@ -279,28 +268,26 @@ object RSocketFactory {
             return this
         }
 
-        private inner class ServerStart<T : Closeable> internal constructor(
-                private val transportServer: () -> ServerTransport<T>) : Start<T> {
+        private inner class ServerStart<T : Closeable>(
+                val transportServer: () -> ServerTransport<T>) : Start<T> {
 
-            override fun start(): Single<T> {
-                return transportServer()
-                        .start(object : ServerTransport.ConnectionAcceptor {
-                            override fun invoke(duplexConnection: DuplexConnection): Completable {
-                                var conn = duplexConnection
-                                if (mtu > 0) {
-                                    conn = FragmentationDuplexConnection(conn, mtu)
-                                }
-
-                                val multiplexer = ClientServerInputMultiplexer(conn, plugins)
-
-                                return multiplexer
-                                        .asStreamZeroConnection()
-                                        .receive()
-                                        .firstOrError()
-                                        .flatMapCompletable { setupFrame -> processSetupFrame(multiplexer, setupFrame) }
+            override fun start(): Single<T> = transportServer()
+                    .start(object : ServerTransport.ConnectionAcceptor {
+                        override fun invoke(duplexConnection: DuplexConnection): Completable {
+                            var conn = duplexConnection
+                            if (mtu > 0) {
+                                conn = FragmentationDuplexConnection(conn, mtu)
                             }
-                        })
-            }
+
+                            val multiplexer = ClientServerInputMultiplexer(conn, plugins)
+
+                            return multiplexer
+                                    .asStreamZeroConnection()
+                                    .receive()
+                                    .firstOrError()
+                                    .flatMapCompletable { setupFrame -> processSetupFrame(multiplexer, setupFrame) }
+                        }
+                    })
 
             private fun processSetupFrame(
                     multiplexer: ClientServerInputMultiplexer, setupFrame: Frame): Completable {
@@ -327,19 +314,41 @@ object RSocketFactory {
                         .map { plugins.applyClient(it) }
 
                 return wrappedRSocketClient
-                        .flatMap { sender -> acceptor
-                                ?.let { it() }
-                                ?.accept(setupPayload, sender)
-                                ?.map { plugins.applyServer(it) }
+                        .flatMap { sender ->
+                            Single.just(acceptor()(setupPayload, sender))
+                                    .map { plugins.applyServer(it) }
                         }
-                        .map { handler -> RSocketServer(
-                                multiplexer.asClientConnection(),
-                                handler,
-                                errorConsumer,
-                                streamDemandLimit)
+                        .map { handler ->
+                            RSocketServer(
+                                    multiplexer.asClientConnection(),
+                                    handler,
+                                    errorConsumer,
+                                    streamDemandLimit)
                         }
                         .ignoreElement()
             }
         }
     }
 }
+
+private const val DEFAULT_STREAM_DEMAND_LIMIT = 128
+
+interface Start<T : Closeable> {
+    fun start(): Single<T>
+}
+
+interface ClientTransportAcceptor {
+    fun transport(transport: () -> ClientTransport): Start<RSocket>
+
+    fun transport(transport: ClientTransport): Start<RSocket> = transport { transport }
+
+}
+
+interface ServerTransportAcceptor {
+    fun <T : Closeable> transport(transport: () -> ServerTransport<T>): Start<T>
+
+    fun <T : Closeable> transport(transport: ServerTransport<T>): Start<T> = transport { transport }
+}
+
+typealias ServerAcceptor = () -> (ConnectionSetupPayload, RSocket) -> RSocket
+typealias ClientAcceptor = () -> (RSocket) -> RSocket

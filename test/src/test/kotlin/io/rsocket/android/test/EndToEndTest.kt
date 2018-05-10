@@ -34,14 +34,8 @@ abstract class EndToEndTest
         server = RSocketFactory
                 .receive()
                 .errorConsumer(errors.errorsConsumer())
-                .acceptor {
-                    object : SocketAcceptor {
-                        override fun accept(setup: ConnectionSetupPayload,
-                                            sendingSocket: RSocket): Single<RSocket> {
-                            return Single.just(handler)
-                        }
-                    }
-                }.transport(serverTransport(address))
+                .acceptor { { _, _ -> handler } }
+                .transport(serverTransport(address))
                 .start()
                 .blockingGet()
 
